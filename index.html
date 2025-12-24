@@ -1,0 +1,689 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>🎄 プレゼント交換（順番開封）</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+
+  <style>
+    #decor { position:fixed; inset:0; pointer-events:none; z-index:0; overflow:hidden; }
+    #app   { position:relative; z-index:10; }
+
+    .decor-top{
+      position:absolute; left:0; right:0; top:0; height:170px;
+      background:url("/img/_e_xmas_d20_s512_xmas_d20_11.png") top center/cover no-repeat;
+      opacity:.22;
+    }
+
+    .snow{ position:absolute; width:6px; height:6px; border-radius:999px; background:rgba(255,255,255,.65);
+      animation: snowFall linear infinite; box-shadow:0 0 10px rgba(255,255,255,.2);
+    }
+    @keyframes snowFall{ from{transform:translateY(-20px)} to{transform:translateY(110vh)} }
+
+    .gift{ position:absolute; width:64px; opacity:.18; filter: drop-shadow(0 12px 18px rgba(0,0,0,.35));
+      animation: drift linear infinite;
+    }
+    @keyframes drift{ from{transform:translateY(-120px) rotate(0deg)} to{transform:translateY(120vh) rotate(360deg)} }
+
+    /* slot */
+    .slotWrap{ display:flex; gap:10px; align-items:center; }
+    .slotBox{
+      height:44px; width:46%;
+      overflow:hidden;
+      border:1px solid rgba(148,163,184,.35);
+      border-radius:14px;
+      background:rgba(2,6,23,.5);
+    }
+    .slotTrack{ transform:translateY(0px); }
+    .slotItem{
+      height:44px; display:flex; align-items:center; justify-content:center;
+      font-weight:800; letter-spacing:.02em;
+    }
+
+    /* FX layer */
+    #fx { position:fixed; inset:0; pointer-events:none; z-index:60; overflow:hidden; }
+    .confetti{
+      position:absolute; width:10px; height:14px; opacity:.9;
+      animation: confettiFall 900ms ease-out forwards;
+    }
+    @keyframes confettiFall{
+      0%   { transform:translateY(-30px) rotate(0deg); opacity:0; }
+      15%  { opacity:1; }
+      100% { transform:translateY(520px) rotate(720deg); opacity:0; }
+    }
+
+    .charLeft, .charRight{
+      position:absolute; bottom:80px;
+      width:160px;
+      opacity:0;
+    }
+    .charLeft{ left:-220px; }
+    .charRight{ right:-220px; font-size:120px; line-height:1; }
+
+    /* ★1.5倍: 1200ms → 1800ms */
+    .charRunLeft{ animation: slideLeft 1800ms ease-in-out forwards; }
+    .charRunRight{ animation: slideRight 1800ms ease-in-out forwards; }
+
+    @keyframes slideLeft{
+      0%{ transform:translateX(0); opacity:0; }
+      20%{ opacity:1; }
+      50%{ transform:translateX(320px); opacity:1; }
+      100%{ transform:translateX(0); opacity:0; }
+    }
+    @keyframes slideRight{
+      0%{ transform:translateX(0); opacity:0; }
+      20%{ opacity:1; }
+      50%{ transform:translateX(-320px); opacity:1; }
+      100%{ transform:translateX(0); opacity:0; }
+    }
+
+    /* 上からメリークリスマスサンタ画像 */
+    #fxMerrySanta{
+      position:absolute;
+      top:-260px;
+      left:50%;
+      transform:translateX(-50%);
+      width:220px;
+      opacity:0;
+      filter: drop-shadow(0 16px 22px rgba(0,0,0,.45));
+    }
+    .merryDrop{
+      animation: merryDrop 1800ms ease-in-out forwards; /* 1.5倍に合わせる */
+    }
+    @keyframes merryDrop{
+      0%   { transform:translateX(-50%) translateY(0); opacity:0; }
+      15%  { opacity:1; }
+      50%  { transform:translateX(-50%) translateY(260px); opacity:1; }
+      100% { transform:translateX(-50%) translateY(0); opacity:0; }
+    }
+  </style>
+</head>
+
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+  <div id="decor" aria-hidden="true">
+    <div class="decor-top"></div>
+  </div>
+
+  <div id="fx" aria-hidden="true">
+    <img id="fxReindeer" class="charLeft" src="/img/_e_xmas_c63_s128_xmas_c63_3.png" alt="">
+    <div id="fxSanta" class="charRight">🎅</div>
+    <img id="fxMerrySanta" src="/img/_e_2018xmas31_s512_2018xmas31_7.png" alt="">
+  </div>
+
+  <div id="app" class="max-w-3xl mx-auto p-6 space-y-4">
+    <header class="flex items-center justify-between">
+      <h1 class="text-xl font-bold">🎄 プレゼント交換（順番開封）</h1>
+      <div id="roomPill" class="hidden text-sm px-3 py-1 rounded-full bg-slate-800"></div>
+    </header>
+
+    <div id="connBar" class="hidden rounded-2xl border border-rose-700 bg-rose-950/60 px-4 py-3 text-sm text-rose-200">
+      サーバー未接続。参加者は <span class="font-semibold">http://(あなたのIP):3000/</span> を開いてください（5500等は不可）。
+    </div>
+
+    <section class="bg-slate-900 rounded-2xl border border-slate-800 p-4 space-y-4">
+
+      <!-- JOIN -->
+      <div id="screenJoin" class="space-y-3">
+        <div class="text-sm text-slate-300">司会は「部屋をつくる」→ ひらがな5文字を共有。参加者は入力して入室。</div>
+
+        <div class="flex gap-2">
+          <button id="btnCreate" class="px-4 py-2 rounded-xl bg-slate-100 text-slate-900 font-semibold">部屋をつくる（司会）</button>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
+          <input id="inpCode" class="md:col-span-1 px-3 py-2 rounded-xl bg-slate-800 border border-slate-700" placeholder="へや（ひらがな5文字）" />
+          <input id="inpName" class="md:col-span-2 px-3 py-2 rounded-xl bg-slate-800 border border-slate-700" placeholder="名前" />
+        </div>
+
+        <button id="btnJoin" class="px-4 py-2 rounded-xl bg-emerald-500 text-slate-950 font-semibold">入室</button>
+        <div id="joinErr" class="hidden text-rose-400 text-sm"></div>
+      </div>
+
+      <!-- ROOM -->
+      <div id="screenRoom" class="hidden space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="flex items-center gap-2">
+            <span class="text-sm text-slate-400">フェーズ</span>
+            <span id="phasePill" class="text-sm px-3 py-1 rounded-full bg-slate-800">-</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <button id="btnSound" class="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-sm">🔊 音OFF</button>
+            <button id="btnHostPrimary" class="hidden px-4 py-2 rounded-xl bg-slate-100 text-slate-900 font-semibold">-</button>
+            <button id="btnLeave" class="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-sm">退出</button>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <aside class="md:col-span-1 bg-slate-950/40 rounded-2xl p-4 border border-slate-800">
+            <div class="flex items-center justify-between mb-2">
+              <div class="text-sm text-slate-400">参加者</div>
+              <div id="statusMini" class="text-xs text-slate-400">-</div>
+            </div>
+            <ul id="userList" class="text-sm space-y-1"></ul>
+          </aside>
+
+          <main class="md:col-span-2 space-y-3">
+
+            <!-- WRITE -->
+            <div id="panelWrite" class="hidden bg-slate-950/40 rounded-2xl p-4 border border-slate-800 space-y-3">
+              <div class="text-sm text-slate-400">🎄 クリスマスカード</div>
+              <input id="giftTitle" class="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700" placeholder="タイトル（例：褒め言葉券）" />
+              <textarea id="giftBody" rows="4" class="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700" placeholder="本文（受取人だけが見れる）"></textarea>
+              <button id="btnSubmitGift" class="px-4 py-2 rounded-xl bg-emerald-500 text-slate-950 font-semibold w-full">完了</button>
+              <div id="giftErr" class="hidden text-rose-400 text-sm"></div>
+            </div>
+
+            <!-- REVEAL -->
+            <div id="panelReveal" class="hidden bg-slate-950/40 rounded-2xl p-4 border border-slate-800 space-y-3">
+              <div class="flex items-center justify-between">
+                <div class="text-sm text-slate-400">🎁 抽選・発表</div>
+                <div id="stepText" class="text-xs text-slate-500">-</div>
+              </div>
+
+              <div class="rounded-2xl bg-slate-900 border border-slate-800 p-4 space-y-3">
+                <div id="rouletteLabel" class="text-lg font-bold">待機中</div>
+
+                <div class="slotWrap">
+                  <div class="slotBox"><div id="slotFrom" class="slotTrack"></div></div>
+                  <div class="text-slate-500 font-bold">→</div>
+                  <div class="slotBox"><div id="slotTo" class="slotTrack"></div></div>
+                </div>
+
+                <div class="text-sm text-slate-300">
+                  <span class="text-slate-400">誰 → 誰：</span><span id="whoToWho" class="font-semibold">-</span>
+                </div>
+                <div class="text-sm">
+                  <span class="text-slate-400">タイトル：</span><span id="pubTitle" class="font-semibold">-</span>
+                </div>
+
+                <div id="receiverBox" class="hidden mt-2 space-y-2">
+                  <button id="btnOpen" class="px-4 py-2 rounded-xl bg-emerald-500 text-slate-950 font-semibold w-full">
+                    受け取る（開封）
+                  </button>
+                  <div class="text-xs text-slate-500">※本文はあなたにだけ表示</div>
+                </div>
+
+                <div id="waitOpen" class="hidden mt-2 text-sm text-slate-400">受取人の開封待ち…</div>
+              </div>
+
+              <div id="privateCard" class="hidden rounded-2xl bg-slate-900 border border-slate-800 p-4 space-y-2">
+                <div class="text-sm text-slate-400">あなたへのカード</div>
+                <div id="privTitle" class="text-lg font-bold">-</div>
+                <div id="privFrom" class="text-sm text-slate-300">-</div>
+                <div id="privBody" class="text-sm whitespace-pre-wrap bg-slate-950/40 border border-slate-800 rounded-xl p-3">-</div>
+                <button id="btnClosePrivate" class="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 w-full">閉じる</button>
+              </div>
+            </div>
+
+            <!-- DONE -->
+            <div id="panelDone" class="hidden bg-slate-950/40 rounded-2xl p-6 border border-slate-800 space-y-3">
+              <div class="text-2xl font-bold">🎉 メリークリスマス！いい日になりますように</div>
+              <img src="/img/_e_xmas_d20_s512_xmas_d20_11.png" class="w-full rounded-2xl opacity-70" alt="">
+              <button id="btnCloseRoom" class="hidden px-4 py-2 rounded-xl bg-slate-100 text-slate-900 font-semibold w-full">部屋を閉じる（司会）</button>
+            </div>
+
+          </main>
+        </div>
+      </div>
+    </section>
+  </div>
+
+<script>
+  const socket = io();
+
+  // ------- state -------
+  let state = { code:null, userId:null, isHost:false, room:null, rouletteTimer:null, fxTimer:null };
+
+  const $ = (id) => document.getElementById(id);
+  const show = (id, v) => $(id).classList.toggle("hidden", !v);
+  const text = (id, t) => $(id).textContent = t;
+
+  // ------- audio -------
+  const audio = { enabled:false };
+  const SFX = {
+    roulette: "/music/roulette.mp3",
+    decide: "/music/decide.mp3",
+    pafu: ["/music/pafu1.mp3", "/music/pafu2.mp3", "/music/pafu3.mp3"],
+  };
+
+  const rouletteAudio = new Audio(SFX.roulette);
+  rouletteAudio.loop = true;
+  rouletteAudio.volume = 0.6;
+
+  function playOne(url, vol=0.85){
+    if(!audio.enabled) return;
+    const a = new Audio(url);
+    a.volume = vol;
+    a.play().catch(()=>{});
+  }
+  function rouletteStart(){
+    if(!audio.enabled) return;
+    rouletteAudio.currentTime = 0;
+    rouletteAudio.play().catch(()=>{});
+  }
+  function rouletteStop(){
+    try { rouletteAudio.pause(); rouletteAudio.currentTime = 0; } catch {}
+  }
+
+  $("btnSound").addEventListener("click", ()=>{
+    audio.enabled = !audio.enabled;
+    $("btnSound").textContent = audio.enabled ? "🔊 音ON" : "🔊 音OFF";
+    if(!audio.enabled) rouletteStop();
+  });
+
+  // ------- decor -------
+  function rand(min,max){ return Math.random()*(max-min)+min; }
+  function addDecor(){
+    const d = $("decor");
+    const gifts = [
+      "/img/_e_xmas_d12_s64_xmas_d12_0.png",
+      "/img/_e_xmas_d12_s64_xmas_d12_4.png",
+      "/img/_e_xmas_d12_s64_xmas_d12_9.png",
+    ];
+    for(let i=0;i<26;i++){
+      const s = document.createElement("div");
+      s.className="snow";
+      s.style.left = rand(0,100)+"vw";
+      s.style.top  = rand(-20,100)+"vh";
+      const size = rand(2,6);
+      s.style.width = size+"px"; s.style.height=size+"px";
+      s.style.opacity = rand(0.25,0.75);
+      s.style.animationDuration = rand(6,14)+"s";
+      s.style.animationDelay = rand(0,6)+"s";
+      d.appendChild(s);
+    }
+    for(let i=0;i<10;i++){
+      const img = document.createElement("img");
+      img.className="gift";
+      img.src = gifts[i%gifts.length];
+      img.style.left = rand(0,100)+"vw";
+      img.style.top  = rand(-30,-10)+"vh";
+      img.style.animationDuration = rand(10,22)+"s";
+      img.style.animationDelay = rand(0,6)+"s";
+      img.style.width = rand(42,74)+"px";
+      d.appendChild(img);
+    }
+  }
+  addDecor();
+
+  // ------- connection UI -------
+  function updateConnUI(){
+    show("connBar", !socket.connected);
+    $("btnSubmitGift").disabled = !socket.connected;
+    $("btnOpen").disabled = !socket.connected;
+  }
+  socket.on("connect", updateConnUI);
+  socket.on("disconnect", updateConnUI);
+  updateConnUI();
+
+  // ------- seeded random (for same confetti across clients) -------
+  function mulberry32(seed){
+    let t = seed >>> 0;
+    return function(){
+      t += 0x6D2B79F5;
+      let r = Math.imul(t ^ (t >>> 15), 1 | t);
+      r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+      return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // ------- FX (confetti only) -------
+  function confettiBurstSeeded(seed){
+    const fx = $("fx");
+    const baseX = window.innerWidth * 0.5;
+    const baseY = window.innerHeight * 0.22;
+
+    const prng = mulberry32(seed || (Date.now()>>>0));
+    const r = (min,max)=> prng()*(max-min)+min;
+
+    const colors = ["#ffffff", "#fde68a", "#34d399", "#fb7185"];
+    for(let i=0;i<60;i++){
+      const c = document.createElement("div");
+      c.className = "confetti";
+      c.style.left = (baseX + r(-180,180)) + "px";
+      c.style.top  = (baseY + r(-40,40)) + "px";
+      c.style.background = colors[i % colors.length];
+      c.style.transform = `translateY(0) rotate(${Math.floor(r(0,360))}deg)`;
+      c.style.animationDuration = r(700, 1100) + "ms";
+      fx.appendChild(c);
+      setTimeout(()=>c.remove(), 1200);
+    }
+  }
+
+  // ------- side chars + merry santa (ONLY for roulette stop) -------
+  function sideCharsAndMerry(){
+    const r = $("fxReindeer");
+    const s = $("fxSanta");
+    const m = $("fxMerrySanta");
+
+    r.classList.remove("charRunLeft");
+    s.classList.remove("charRunRight");
+    m.classList.remove("merryDrop");
+
+    void r.offsetWidth;
+
+    r.classList.add("charRunLeft");
+    s.classList.add("charRunRight");
+    m.classList.add("merryDrop");
+  }
+
+  // ------- join/create -------
+  $("btnCreate").addEventListener("click", ()=>{
+    socket.emit("room:create", {}, (res)=>{
+      if(!res?.ok) return;
+      $("inpCode").value = res.code;
+      $("inpName").value = $("inpName").value || "司会サンタ";
+    });
+  });
+
+  $("btnJoin").addEventListener("click", ()=>{
+    const code = $("inpCode").value.trim().normalize("NFC");
+    const name = $("inpName").value.trim();
+    show("joinErr", false);
+
+    socket.emit("room:join", {code, name}, (res)=>{
+      if(!res?.ok){
+        show("joinErr", true);
+        text("joinErr", `入室失敗: ${res.error}`);
+        return;
+      }
+      state.code = res.room.code;
+      state.userId = res.userId;
+      state.isHost = res.isHost;
+
+      show("screenJoin", false);
+      show("screenRoom", true);
+
+      $("roomPill").classList.remove("hidden");
+      text("roomPill", `ROOM: ${state.code}`);
+
+      render(res.room);
+    });
+  });
+
+  // ------- actions -------
+  $("btnLeave").addEventListener("click", ()=>{
+    if(!state.code) return location.reload();
+    const msg = state.isHost
+      ? "退出すると部屋が終了し、全員が退出します。よろしいですか？"
+      : "退出して入室画面に戻ります。よろしいですか？";
+    if(!confirm(msg)) return;
+    socket.emit("room:leave", { code: state.code, userId: state.userId }, ()=>location.reload());
+  });
+
+  $("btnSubmitGift").addEventListener("click", ()=>{
+    show("giftErr", false);
+    const title = $("giftTitle").value.trim();
+    const body  = $("giftBody").value.trim();
+    socket.emit("gift:submit", { code: state.code, userId: state.userId, title, body }, (res)=>{
+      if(!res?.ok){
+        show("giftErr", true);
+        text("giftErr", `完了できない: ${res.error}`);
+        return;
+      }
+      $("btnSubmitGift").textContent = "✅ 完了済み";
+      $("btnSubmitGift").disabled = true;
+    });
+  });
+
+  $("btnClosePrivate").addEventListener("click", ()=> show("privateCard", false));
+
+  $("btnOpen").addEventListener("click", ()=>{
+    socket.emit("reveal:open", { code: state.code, userId: state.userId }, (res)=>{
+      if(!res?.ok) alert(`開封できない: ${res.error}`);
+    });
+  });
+
+  $("btnCloseRoom").addEventListener("click", ()=>{
+    if(!confirm("部屋を閉じます。全員が退出します。よろしいですか？")) return;
+    socket.emit("room:close", { code: state.code }, (res)=>{
+      if(!res?.ok) alert(`閉鎖できない: ${res.error}`);
+    });
+  });
+
+  // ------- server events -------
+  socket.on("room:update", (room)=>{
+    if(!state.code || room.code !== state.code) return;
+    state.isHost = (room.hostSocketId === socket.id);
+    render(room);
+  });
+
+  // 入力完了SE 1→2→3
+  socket.on("sfx:submit", ({idx})=>{
+    const url = SFX.pafu[(idx-1)%3];
+    playOne(url, 0.9);
+  });
+
+  // ルーレット同期
+  socket.on("anim:roulette", (step)=>{
+    runRouletteSynced(step);
+  });
+
+  // 受取人だけ本文
+  socket.on("reveal:private", (p)=>{
+    $("privTitle").textContent = p.title;
+    $("privFrom").textContent = `差出人：${p.fromName}`;
+    $("privBody").textContent = p.body;
+    show("privateCard", true);
+  });
+
+  // ★追加：開封した瞬間、全員へ「紙吹雪だけ」(同期)
+  socket.on("fx:confetti", ({startAt, seed})=>{
+    const delay = Math.max(0, (startAt || Date.now()) - Date.now());
+    clearTimeout(state.fxTimer);
+    state.fxTimer = setTimeout(()=> confettiBurstSeeded(seed), delay);
+  });
+
+  socket.on("room:closed", ()=>{
+    alert("部屋が閉じられました。");
+    location.reload();
+  });
+
+  // ------- UI helpers -------
+  function phaseLabel(phase){
+    if(phase==="lobby") return "待機";
+    if(phase==="write") return "カード入力";
+    if(phase==="reveal") return "抽選・発表";
+    if(phase==="done") return "終了";
+    return "-";
+  }
+
+  function applyRevealButtons(step){
+    if(!step){
+      show("receiverBox", false);
+      show("waitOpen", false);
+      return;
+    }
+    const amReceiver = (step.toId === state.userId);
+
+    if(step.opened){
+      show("receiverBox", false);
+      show("waitOpen", true);
+    }else{
+      show("receiverBox", amReceiver);
+      show("waitOpen", !amReceiver);
+      $("btnOpen").disabled = !socket.connected;
+    }
+  }
+
+  function render(room){
+    state.room = room;
+
+    text("phasePill", phaseLabel(room.phase));
+
+    const total = room.users.length;
+    const done = room.users.filter(u=>u.submitted).length;
+    text("statusMini", room.phase==="write" ? `${done}/${total} 完了` : `${total} 人`);
+
+    $("userList").innerHTML = "";
+    for(const u of room.users){
+      const li = document.createElement("li");
+      const mark = (room.phase==="write") ? (u.submitted ? "✅" : "…") : "🎁";
+      li.textContent = `${mark} ${u.name}`;
+      $("userList").appendChild(li);
+    }
+
+    show("panelWrite", room.phase==="write");
+    show("panelReveal", room.phase==="reveal");
+    show("panelDone", room.phase==="done");
+
+    // host button minimal
+    const hostBtn = $("btnHostPrimary");
+    show("btnHostPrimary", state.isHost);
+
+    if(state.isHost){
+      hostBtn.disabled = false;
+
+      if(room.phase==="lobby"){
+        hostBtn.textContent = "開始";
+        hostBtn.onclick = ()=> socket.emit("room:start", { code: state.code }, (res)=>{ if(!res?.ok) alert(res.error); });
+      } else if(room.phase==="write"){
+        if(done === total && total >= 2){
+          hostBtn.textContent = "抽選開始";
+          hostBtn.onclick = ()=> socket.emit("draw:start", { code: state.code }, (res)=>{ if(!res?.ok) alert(res.error); });
+        } else {
+          hostBtn.textContent = "抽選開始（全員完了待ち）";
+          hostBtn.disabled = true;
+          hostBtn.onclick = null;
+        }
+      } else if(room.phase==="reveal"){
+        const step = room.step;
+        if(step && step.opened){
+          hostBtn.textContent = "次へ";
+          hostBtn.onclick = ()=> socket.emit("reveal:next", { code: state.code }, (res)=>{ if(!res?.ok) alert(res.error); });
+        } else {
+          hostBtn.textContent = "次へ（開封待ち）";
+          hostBtn.disabled = true;
+          hostBtn.onclick = null;
+        }
+      } else if(room.phase==="done"){
+        hostBtn.textContent = "（操作なし）";
+        hostBtn.disabled = true;
+        hostBtn.onclick = null;
+      }
+    }
+
+    if(room.phase==="write"){
+      const me = room.users.find(u=>u.id===state.userId);
+      if(me?.submitted){
+        $("btnSubmitGift").textContent = "✅ 完了済み";
+        $("btnSubmitGift").disabled = true;
+      } else {
+        $("btnSubmitGift").textContent = "完了";
+        $("btnSubmitGift").disabled = !socket.connected;
+      }
+    }
+
+    if(room.phase==="reveal"){
+      const step = room.step;
+      if(!step){
+        text("stepText","-");
+        text("rouletteLabel","待機中");
+        text("whoToWho","-");
+        text("pubTitle","-");
+        applyRevealButtons(null);
+      } else {
+        text("stepText", `${step.step}/${step.total}`);
+
+        // 既に止まってるなら確定表示
+        const now = Date.now();
+        const endAt = (step.startAt || now) + (step.durationMs || 0);
+        if(now > endAt + 50){
+          text("rouletteLabel", step.opened ? "開封された！" : "発表！");
+          text("whoToWho", `${step.fromName} → ${step.toName}`);
+          text("pubTitle", step.title);
+        }
+
+        applyRevealButtons(step);
+      }
+    }
+
+    if(room.phase==="done"){
+      show("btnCloseRoom", state.isHost);
+    }
+  }
+
+  // ------- roulette slot animation (synced) -------
+  function buildSlot(trackEl, names, finalName){
+    const repeat = 20;
+    const list = [];
+    for(let r=0;r<repeat;r++) list.push(...names);
+
+    const base = list.length - names.length;
+    const target = base + Math.max(0, names.indexOf(finalName));
+
+    trackEl.innerHTML = "";
+    for(const n of list){
+      const div = document.createElement("div");
+      div.className = "slotItem";
+      div.textContent = n;
+      trackEl.appendChild(div);
+    }
+    return target;
+  }
+
+  function runRouletteSynced(step){
+    if(!state.room) return;
+
+    const names = state.room.users.map(u=>u.name);
+    const fromTrack = $("slotFrom");
+    const toTrack = $("slotTo");
+
+    fromTrack.style.transition = "none";
+    toTrack.style.transition = "none";
+    fromTrack.style.transform = "translateY(0px)";
+    toTrack.style.transform = "translateY(0px)";
+
+    text("rouletteLabel", "抽選中…");
+    text("whoToWho", "-");
+    text("pubTitle", "-");
+    applyRevealButtons(null);
+
+    const itemH = 44;
+    const fromIdx = buildSlot(fromTrack, names, step.fromName);
+    const toIdx = buildSlot(toTrack, names, step.toName);
+
+    const startAt = step.startAt || (Date.now()+200);
+    const duration = step.durationMs || 1700;
+    const now = Date.now();
+
+    const delay = Math.max(0, startAt - now);
+    const remaining = Math.max(80, duration - Math.max(0, now - startAt));
+
+    clearTimeout(state.rouletteTimer);
+
+    state.rouletteTimer = setTimeout(()=>{
+      rouletteStart();
+
+      requestAnimationFrame(()=>{
+        fromTrack.style.transition = `transform ${remaining}ms cubic-bezier(.12,.78,.22,1)`;
+        toTrack.style.transition = `transform ${remaining}ms cubic-bezier(.12,.78,.22,1)`;
+        fromTrack.style.transform = `translateY(${-fromIdx*itemH}px)`;
+        toTrack.style.transform = `translateY(${-toIdx*itemH}px)`;
+      });
+
+      setTimeout(()=>{
+        rouletteStop();
+        playOne(SFX.decide, 0.95);
+
+        // ルーレット停止時の派手演出（紙吹雪 + トナカイ/サンタ + メリーサンタ）
+        confettiBurstSeeded((Date.now() ^ 0x12345678)>>>0);
+        sideCharsAndMerry();
+
+        text("rouletteLabel", "発表！");
+        text("whoToWho", `${step.fromName} → ${step.toName}`);
+        text("pubTitle", step.title);
+
+        // ★ここが重要：受取人は開封ボタン復活
+        applyRevealButtons(step);
+
+      }, remaining);
+
+    }, delay);
+  }
+</script>
+</body>
+</html>
